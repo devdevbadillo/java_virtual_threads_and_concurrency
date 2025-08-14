@@ -6,9 +6,8 @@
   - [Introducción a Virtual Threads](#introduccion-a-virtual-threads)
     - [¿Qué problema resuelven?](#problema-virtual-threads)
     - [Concepto de User-Mode vs. Kernel-Mode Threads](#user-mode-vs-kernel-mode)
-    - [Modelo de Carrier Threads (Platform Threads)](#carrier-threads)
-      - [Ventajas clave](#ventajas-virtual-threads)
-      - [Diferencias con otros modelos de concurrencia](#diferencias-otros-modelos)
+    - [Modelo de Carrier Threads](#carrier-threads)
+    - [Diferencias con Programación Asíncrona/Reactiva](#diferencias-otros-modelos)
   - [Creación y Gestión de Virtual Threads](#creacion-gestion-virtual-threads)
     - [`Thread.ofVirtual()` y `Thread.Builder`](#thread-ofvirtual-thread-builder)
     - [`Executors.newVirtualThreadPerTaskExecutor()`](#executors-newvirtualthreadpertaskexecutor)
@@ -134,21 +133,90 @@
 
 <a id="introduccion-a-virtual-threads"></a>
 ### Introducción a Virtual Threads
+Los Virtual Threads son una nueva característica de la Plataforma Java (a partir de Java 21 como característica final) que busca simplificar el desarrollo de aplicaciones concurrentes de alto rendimiento, especialmente aquellas que realizan muchas operaciones de I/O (entrada/salida).
+
+> El objetivo principal es permitir a los desarrolladores escribir código concurrente utilizando el modelo de "un hilo por tarea" (one-thread-per-task) sin el costo y la complejidad que esto conlleva con los hilos tradicionales.
 
 <a id="problema-virtual-threads"></a>
 #### ¿Qué problema resuelven?
 
+`Los hilos de la plataforma` (conocidos como Platform Threads), que **son una envoltura simple de los hilos del sistema operativo** (OS threads), **son recursos costosos y limitados**.
+
+Los hilos de la plataforma **tienen un tamaño de pila fijo** (generalmente 1 MB o más) y su creación y conmutación de contexto son lentas. Cuando una aplicación tiene miles de conexiones concurrentes, crear un hilo de la plataforma para cada una es inviable debido a los altos costos de memoria y la sobrecarga de la CPU para gestionarlos. Esto a menudo lleva a diseños complejos basados en programación reactiva o event loops para evitar el bloqueo, lo cual puede ser difícil de entender y depurar.
+
+Los `Virtual Threads` resuelven este problema al ser hilos muy ligeros y numerosos, casi "ilimitados", que no están directamente ligados a un hilo del sistema operativo. Esto permite que el modelo de programación de "un hilo por tarea" vuelva a ser viable y eficiente, sin los inconvenientes de los hilos tradicionales.
+
+
 <a id="user-mode-vs-kernel-mode"></a>
 #### Concepto de User-Mode vs. Kernel-Mode Threads
 
-<a id="carrier-threads"></a>
-#### Modelo de Carrier Threads (Platform Threads)
+> `Kernel-Mode Threads`: 
 
-<a id="ventajas-virtual-threads"></a>
-#### Ventajas clave
+1. Son los hilos gestionados directamente por el sistema operativo (kernel).
+2. El kernel es responsable de su creación, programación (scheduling), y gestión.
+3. El sistema operativo ve y asigna tiempo de CPU a estos hilos.
+4. Los hilos de la plataforma (Platform Threads) en Java son esencialmente una envoltura para estos hilos del sistema operativo.
+
+> `User-Mode Threads`
+
+1. Son hilos que son gestioandos por la aplicación o por una capa de software por encima del kernel (en este caso, la Máquina Virtual de Java o JVM)
+2. El kernel no tiene conocimiento directo de estos hilos
+3. La conmutación de contexto entre ellos es mucho más rápida ya que no requiere una llamada al sistema
+4. Los Virtual Threads son un tipo de hilos en modo usuario
+
+> [!IMPORTANT]
+> Los Virtual Threads son creados y programados por el JVM, no por el sistema operativo. El JVM decide cuándo y dónde ejecutar un Virtual Thread, y puede "montar" y "desmontar" un Virtual Thread en un hilo del sistema operativo según sea necesario.
+
+<a id="carrier-threads"></a>
+#### Modelo de Carrier Threads
+
+Los `Virtual Threads` no se ejecutan por sí solos. En su lugar, **la JVM los ejecuta sobre un grupo de hilos del sistema operativo** (Platform Threads) que actúan como "portadores" (`Carrier Threads`).
+
+- El modelo funciona así:
+
+1. Un `Virtual Thread` se crea para ejecutar una tarea.
+2. El JVM le asigna un `Carrier Thread` libre para que lo ejecute.
+3. El `Virtual Thread` se ejecuta en el `Carrier Thread` hasta que se bloquea, por ejemplo, al realizar una operación de I/O.
+4. Cuando el Virtual Thread se bloquea, el JVM lo "desmonta" del Carrier Thread, permitiendo que ese Carrier Thread quede libre para ejecutar otro Virtual Thread.
+5. Una vez que la operación de I/O termina, el JVM toma el Virtual Thread "desmontado" y lo "monta" de nuevo en un Carrier Thread libre para que continúe su ejecución.
 
 <a id="diferencias-otros-modelos"></a>
-#### Diferencias con otros modelos de concurrencia
+#### Diferencias con Programación Asíncrona/Reactiva
+
+La principal diferencia radica en el **modelo de programación** y en cómo se maneja el bloqueo.
+
+> Virtual Threads:
+
+1. El modelo de `Virtual Threads` es **imperativo y síncrono**. Se escribe el código como si cada tarea se ejecutara de forma secuencial, una instrucción después de otra.
+2. La magia de la concurrencia y el no-bloqueo ocurre "por debajo" gracias a la JVM
+
+- Ejemplo:
+  
+```
+public void processData() {
+    // La JVM libera el carrier thread mientras finaliza de cargar la data
+    String data = api.fetchDataFromExternalService();
+
+    // El hilo continúa su ejecución cuando la data llega
+    db.save(data);
+}
+```
+
+> Programación Asíncrona/Reactiva:
+
+1. El modelo asíncrono/reactivo es **declarativo y basado en eventos**. En lugar de esperar a que una operación termine, se le dice al sistema "cuando la operación termine, ejecuta esta función (`callback`) con el resultado".
+
+¿Cómo funciona? 
+Cuando se inicia una operación de I/O, **el hilo de trabajo simplemente la delega al sistema operativo** y se libera inmediatamente para procesar la siguiente tarea. **Cuando la operación asíncrona termina, el sistema envía una notificación al "event loop"**, que encola el "callback" para que sea ejecutado por un hilo de trabajo
+
+- Ejemplo
+
+```
+CompletableFuture<String> future = CompletableFuture
+    .supplyAsync(() -> fetchData())
+    .thenApply(data -> transformData(data))
+    .thenCompose(transformed -> saveData(transformed));
+```
 
 <a id="creacion-gestion-virtual-threads"></a>
 ### Creación y Gestión de Virtual Threads
